@@ -8,7 +8,9 @@ import (
 	"slices"
 	"time"
 
+	"github.com/quic-go/quic-go/internal/congestion"
 	"github.com/quic-go/quic-go/internal/handshake"
+	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
 	"github.com/quic-go/quic-go/qlogwriter"
 )
@@ -175,6 +177,8 @@ type Config struct {
 	// Enable QUIC Stream Resets with Partial Delivery.
 	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-07.
 	EnableStreamResetPartialDelivery bool
+	// Set custom congestion control algorithm
+	Congestion func() SendAlgorithmWithDebugInfos
 
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
 }
@@ -212,4 +216,35 @@ type ConnectionState struct {
 	Version Version
 	// GSO says if generic segmentation offload is used.
 	GSO bool
+}
+
+type ByteCount = protocol.ByteCount
+
+var _ congestion.SendAlgorithmWithDebugInfos = (SendAlgorithmWithDebugInfos)(nil)
+
+// A SendAlgorithm performs congestion control
+type SendAlgorithm interface {
+	TimeUntilSend(bytesInFlight ByteCount) monotime.Time
+	HasPacingBudget(now monotime.Time) bool
+	OnPacketSent(sentTime monotime.Time, bytesInFlight ByteCount, packetNumber protocol.PacketNumber, bytes ByteCount, isRetransmittable bool)
+	CanSend(bytesInFlight ByteCount) bool
+	MaybeExitSlowStart()
+	OnPacketAcked(number protocol.PacketNumber, ackedBytes ByteCount, priorInFlight ByteCount, eventTime monotime.Time)
+	OnCongestionEvent(number protocol.PacketNumber, lostBytes ByteCount, priorInFlight ByteCount)
+	OnRetransmissionTimeout(packetsRetransmitted bool)
+	SetMaxDatagramSize(ByteCount)
+
+	SetMinRTT(func() time.Duration)
+}
+
+// A SendAlgorithmWithDebugInfos is a SendAlgorithm that exposes some debug infos
+type SendAlgorithmWithDebugInfos interface {
+	SendAlgorithm
+	InSlowStart() bool
+	InRecovery() bool
+	GetCongestionWindow() ByteCount
+}
+
+func NewTime() monotime.Time {
+	return monotime.Now()
 }

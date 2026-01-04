@@ -104,6 +104,9 @@ func populateConfig(config *Config) *Config {
 	if initialPacketSize == 0 {
 		initialPacketSize = protocol.InitialPacketSize
 	}
+	if config.Congestion == nil {
+		config.Congestion = func() SendAlgorithmWithDebugInfos { return nil }
+	}
 
 	return &Config{
 		GetConfigForClient:               config.GetConfigForClient,
@@ -125,5 +128,6 @@ func populateConfig(config *Config) *Config {
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
 		Allow0RTT:                        config.Allow0RTT,
 		Tracer:                           config.Tracer,
+		Congestion:                       config.Congestion,
 	}
 }
