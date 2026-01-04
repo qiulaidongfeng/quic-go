@@ -36,6 +36,8 @@ func NewMockSendAlgorithm(ctrl *gomock.Controller) *MockSendAlgorithm {
 	return mock
 }
 
+func (m *MockSendAlgorithm) OnRetransmissionTimeout(packetsRetransmitted bool) { return }
+
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockSendAlgorithm) EXPECT() *MockSendAlgorithmMockRecorder {
 	return m.recorder
@@ -192,7 +194,7 @@ func (c *MockSendAlgorithmMaybeExitSlowStartCall) DoAndReturn(f func()) *MockSen
 }
 
 // OnCongestionEvent mocks base method.
-func (m *MockSendAlgorithm) OnCongestionEvent(number protocol.PacketNumber) {
+func (m *MockSendAlgorithm) OnCongestionEvent(number protocol.PacketNumber, _ protocol.ByteCount, _ protocol.ByteCount) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "OnCongestionEvent", number)
 }
@@ -228,7 +230,7 @@ func (c *MockSendAlgorithmOnCongestionEventCall) DoAndReturn(f func(protocol.Pac
 }
 
 // OnPacketAcked mocks base method.
-func (m *MockSendAlgorithm) OnPacketAcked(number protocol.PacketNumber, priorInFlight protocol.ByteCount) {
+func (m *MockSendAlgorithm) OnPacketAcked(number protocol.PacketNumber, ackedBytes protocol.ByteCount, priorInFlight protocol.ByteCount, eventTime monotime.Time) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "OnPacketAcked", number, priorInFlight)
 }
@@ -264,7 +266,7 @@ func (c *MockSendAlgorithmOnPacketAckedCall) DoAndReturn(f func(protocol.PacketN
 }
 
 // OnPacketSent mocks base method.
-func (m *MockSendAlgorithm) OnPacketSent(sentTime monotime.Time, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool) {
+func (m *MockSendAlgorithm) OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.ByteCount, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "OnPacketSent", sentTime, packetNumber, bytes, isRetransmittable)
 }
@@ -372,7 +374,7 @@ func (c *MockSendAlgorithmSetMaxDatagramSizeCall) DoAndReturn(f func(protocol.By
 }
 
 // TimeUntilSend mocks base method.
-func (m *MockSendAlgorithm) TimeUntilSend() monotime.Time {
+func (m *MockSendAlgorithm) TimeUntilSend(_ protocol.ByteCount) monotime.Time {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "TimeUntilSend")
 	ret0, _ := ret[0].(monotime.Time)

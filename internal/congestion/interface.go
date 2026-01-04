@@ -7,14 +7,15 @@ import (
 
 // A SendAlgorithm performs congestion control
 type SendAlgorithm interface {
-	TimeUntilSend() monotime.Time
+	TimeUntilSend(bytesInFlight protocol.ByteCount) monotime.Time
 	HasPacingBudget(now monotime.Time) bool
-	OnPacketSent(sentTime monotime.Time, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool)
+	OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.ByteCount, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool)
 	CanSend(bytesInFlight protocol.ByteCount) bool
-	GetCongestionWindow() protocol.ByteCount
 	MaybeExitSlowStart()
-	OnPacketAcked(number protocol.PacketNumber, priorInFlight protocol.ByteCount)
-	OnCongestionEvent(number protocol.PacketNumber)
 	OnSpuriousLoss(number protocol.PacketNumber)
+	OnPacketAcked(number protocol.PacketNumber, ackedBytes protocol.ByteCount, priorInFlight protocol.ByteCount, eventTime monotime.Time)
+	OnCongestionEvent(number protocol.PacketNumber, lostBytes protocol.ByteCount, priorInFlight protocol.ByteCount)
+	OnRetransmissionTimeout(packetsRetransmitted bool)
 	SetMaxDatagramSize(protocol.ByteCount)
+	GetCongestionWindow() protocol.ByteCount
 }

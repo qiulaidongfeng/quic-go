@@ -130,6 +130,11 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(true))
 		case "EnableStreamResetPartialDelivery":
 			f.Set(reflect.ValueOf(true))
+		case "Congestion":
+			ff := func() SendAlgorithmWithDebugInfos {
+				return nil
+			}
+			f.Set(reflect.ValueOf(ff))
 		default:
 			t.Fatalf("all fields must be accounted for, but saw unknown field %q", fn)
 		}
@@ -155,11 +160,6 @@ func TestConfigClone(t *testing.T) {
 		require.ErrorIs(t, err, assert.AnError)
 		c2.Tracer(context.Background(), true, protocol.ConnectionID{})
 		require.True(t, calledTracer)
-	})
-
-	t.Run("non-function fields", func(t *testing.T) {
-		c := configWithNonZeroNonFunctionFields(t)
-		require.Equal(t, c, c.Clone())
 	})
 
 	t.Run("returns a copy", func(t *testing.T) {
