@@ -132,7 +132,7 @@ func populateConfig(config *Config) *Config {
 		RequireStreamCreditRelease:       config.RequireStreamCreditRelease,
 		TokenStore:                       config.TokenStore,
 		EnableDatagrams:                  config.EnableDatagrams,
-		InitialPacketSize:                config.InitialPacketSize,
+		InitialPacketSize:                initialPacketSize,
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
 		Allow0RTT:                        config.Allow0RTT,
