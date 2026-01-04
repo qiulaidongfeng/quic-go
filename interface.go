@@ -243,3 +243,8 @@ type SendAlgorithmWithDebugInfos interface {
 func NewTime() monotime.Time {
 	return monotime.Now()
 }
+
+func NewBBRv1(conf *Config) SendAlgorithmWithDebugInfos {
+	conf = populateConfig(conf)
+	return congestion.NewBBRv1Sender(protocol.ByteCount(conf.InitialPacketSize), protocol.ByteCount(conf.InitialConnectionReceiveWindow))
+}
