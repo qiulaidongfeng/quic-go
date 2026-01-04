@@ -19,7 +19,7 @@ const (
 )
 
 type testRenoSender struct {
-	sender            *renoSender
+	sender            *RenoSender
 	now               monotime.Time
 	rttStats          *utils.RTTStats
 	bytesInFlight     protocol.ByteCount
@@ -44,7 +44,7 @@ func newTestRenoSender() *testRenoSender {
 func (s *testRenoSender) SendAvailableSendWindow() int {
 	var packetsSent int
 	for s.sender.CanSend(s.bytesInFlight) {
-		s.sender.OnPacketSent(s.now, s.packetNumber, maxDatagramSize, true)
+		s.sender.OnPacketSent(s.now, s.bytesInFlight, s.packetNumber, maxDatagramSize, true)
 		s.packetNumber++
 		packetsSent++
 		s.bytesInFlight += maxDatagramSize
@@ -57,7 +57,7 @@ func (s *testRenoSender) AckNPackets(n int) {
 	s.sender.MaybeExitSlowStart()
 	for range n {
 		s.ackedPacketNumber++
-		s.sender.OnPacketAcked(s.ackedPacketNumber, s.bytesInFlight)
+		s.sender.OnPacketAcked(s.ackedPacketNumber, 0, s.bytesInFlight, s.now)
 	}
 	s.bytesInFlight -= protocol.ByteCount(n) * maxDatagramSize
 	s.now = s.now.Add(time.Millisecond)
@@ -66,13 +66,13 @@ func (s *testRenoSender) AckNPackets(n int) {
 func (s *testRenoSender) LoseNPackets(n int) {
 	for range n {
 		s.ackedPacketNumber++
-		s.sender.OnCongestionEvent(s.ackedPacketNumber)
+		s.sender.OnCongestionEvent(s.ackedPacketNumber, 0, s.bytesInFlight)
 	}
 	s.bytesInFlight -= protocol.ByteCount(n) * maxDatagramSize
 }
 
 func (s *testRenoSender) LosePacket(number protocol.PacketNumber) {
-	s.sender.OnCongestionEvent(number)
+	s.sender.OnCongestionEvent(number, 0, s.bytesInFlight)
 	s.bytesInFlight -= maxDatagramSize
 }
 
@@ -83,7 +83,7 @@ func TestRenoSenderStartup(t *testing.T) {
 	require.Equal(t, defaultWindowTCP, sender.sender.GetCongestionWindow())
 
 	// Make sure we can send.
-	require.Zero(t, sender.sender.TimeUntilSend())
+	require.Zero(t, sender.sender.TimeUntilSend(sender.bytesInFlight))
 	require.True(t, sender.sender.CanSend(sender.bytesInFlight))
 
 	// And that window is un-affected.
@@ -106,7 +106,7 @@ func TestRenoSenderPacing(t *testing.T) {
 	sender.AckNPackets(1)
 
 	// Check that we can't send immediately due to pacing
-	delay := sender.sender.TimeUntilSend()
+	delay := sender.sender.TimeUntilSend(sender.bytesInFlight)
 	require.NotZero(t, delay)
 	require.Less(t, delay.Sub(sender.now), time.Hour)
 }
@@ -120,14 +120,14 @@ func TestRenoSenderPacingRate(t *testing.T) {
 
 	// Exhaust the burst allowance before checking the pacing rate.
 	for pn := protocol.PacketNumber(0); sender.HasPacingBudget(now); pn++ {
-		sender.OnPacketSent(now, pn, maxDatagramSize, true)
+		sender.OnPacketSent(now, 0, pn, maxDatagramSize, true)
 	}
-	require.Equal(t, rtt/(2*initialCongestionWindow), sender.TimeUntilSend().Sub(now))
+	require.Equal(t, rtt/(2*initialCongestionWindow), sender.TimeUntilSend(0).Sub(now))
 
-	sender.OnCongestionEvent(0)
-	require.False(t, sender.inSlowStart())
+	sender.OnCongestionEvent(0, 0, 0)
+	require.False(t, sender.InSlowStart())
 	wantDelay := float64(rtt) * float64(maxDatagramSize) / (1.25 * float64(sender.GetCongestionWindow()))
-	require.InDelta(t, wantDelay, float64(sender.TimeUntilSend().Sub(now)), float64(time.Microsecond))
+	require.InDelta(t, wantDelay, float64(sender.TimeUntilSend(0).Sub(now)), float64(time.Microsecond))
 }
 
 func TestRenoSenderPacingInitialPacketSize(t *testing.T) {
@@ -138,9 +138,9 @@ func TestRenoSenderPacingInitialPacketSize(t *testing.T) {
 	sender := NewRenoSender(rttStats, size, nil)
 
 	for pn := protocol.PacketNumber(0); sender.HasPacingBudget(now); pn++ {
-		sender.OnPacketSent(now, pn, size, true)
+		sender.OnPacketSent(now, 0, pn, size, true)
 	}
-	require.True(t, sender.HasPacingBudget(sender.TimeUntilSend()))
+	require.True(t, sender.HasPacingBudget(sender.TimeUntilSend(0)))
 }
 
 func TestRenoSenderApplicationLimitedSlowStart(t *testing.T) {
@@ -148,7 +148,7 @@ func TestRenoSenderApplicationLimitedSlowStart(t *testing.T) {
 
 	// At startup make sure we can send.
 	require.True(t, sender.sender.CanSend(0))
-	require.Zero(t, sender.sender.TimeUntilSend())
+	require.Zero(t, sender.sender.TimeUntilSend(0))
 
 	// Send exactly 10 packets and ensure the CWND ends at 14 packets.
 	const numberOfAcks = 5
@@ -168,7 +168,7 @@ func TestRenoSenderExponentialSlowStart(t *testing.T) {
 
 	// At startup make sure we can send.
 	require.True(t, sender.sender.CanSend(0))
-	require.Zero(t, sender.sender.TimeUntilSend())
+	require.Zero(t, sender.sender.TimeUntilSend(0))
 
 	const numberOfAcks = 20
 	for range numberOfAcks {
@@ -383,7 +383,7 @@ func TestRenoSenderSpuriousLossAfterWindowGrowth(t *testing.T) {
 	window := sender.sender.GetCongestionWindow()
 	sender.sender.OnSpuriousLoss(1)
 	require.Equal(t, window, sender.sender.GetCongestionWindow())
-	require.False(t, sender.sender.inSlowStart())
+	require.False(t, sender.sender.InSlowStart())
 	require.Zero(t, sender.sender.undoState)
 }
 
@@ -393,16 +393,16 @@ func TestRenoSenderSpuriousLossWithECN(t *testing.T) {
 			sender := newTestRenoSender()
 			sender.SendAvailableSendWindow()
 			if ecnFirst {
-				sender.sender.OnCongestionEvent(10)
+				sender.sender.OnCongestionEvent(10, 0, sender.bytesInFlight)
 			}
 			sender.LoseNPackets(1)
 			if !ecnFirst {
-				sender.sender.OnCongestionEvent(10)
+				sender.sender.OnCongestionEvent(10, 0, sender.bytesInFlight)
 			}
 			window := sender.sender.GetCongestionWindow()
 			sender.sender.OnSpuriousLoss(1)
 			require.Equal(t, window, sender.sender.GetCongestionWindow())
-			require.False(t, sender.sender.inSlowStart())
+			require.False(t, sender.sender.InSlowStart())
 		})
 	}
 }
@@ -478,7 +478,7 @@ func TestRenoSenderSlowStartsUpToMaximumCongestionWindow(t *testing.T) {
 
 	for i := 1; i < protocol.MaxCongestionWindowPackets; i++ {
 		sender.MaybeExitSlowStart()
-		sender.OnPacketAcked(protocol.PacketNumber(i), sender.GetCongestionWindow())
+		sender.OnPacketAcked(protocol.PacketNumber(i), 0, sender.GetCongestionWindow(), monotime.Now())
 	}
 	require.Equal(t, initialMaxCongestionWindow, sender.GetCongestionWindow())
 }
@@ -499,7 +499,7 @@ func TestRenoSenderSlowStartsPacketSizeIncrease(t *testing.T) {
 	const packetSize = initialMaxDatagramSize + 100
 	sender.SetMaxDatagramSize(packetSize)
 	for i := 1; i < protocol.MaxCongestionWindowPackets; i++ {
-		sender.OnPacketAcked(protocol.PacketNumber(i), sender.GetCongestionWindow())
+		sender.OnPacketAcked(protocol.PacketNumber(i), 0, sender.GetCongestionWindow(), monotime.Now())
 	}
 	const maxCwnd = protocol.MaxCongestionWindowPackets * packetSize
 	require.Greater(t, sender.GetCongestionWindow(), maxCwnd)
