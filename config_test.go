@@ -130,6 +130,11 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(true))
 		case "EnableStreamResetPartialDelivery":
 			f.Set(reflect.ValueOf(true))
+		case "Congestion":
+			ff := func() SendAlgorithmWithDebugInfos {
+				return nil
+			}
+			f.Set(reflect.ValueOf(ff))
 		default:
 			t.Fatalf("all fields must be accounted for, but saw unknown field %q", fn)
 		}
