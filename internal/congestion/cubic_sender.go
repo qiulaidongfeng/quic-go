@@ -20,7 +20,7 @@ const (
 	initialCongestionWindow    = 32
 )
 
-type cubicSender struct {
+type CubicSender struct {
 	hybridSlowStart HybridSlowStart
 	rttStats        *utils.RTTStats
 	connStats       *utils.ConnectionStats
@@ -62,8 +62,8 @@ type cubicSender struct {
 }
 
 var (
-	_ SendAlgorithm               = &cubicSender{}
-	_ SendAlgorithmWithDebugInfos = &cubicSender{}
+	_ SendAlgorithm               = &CubicSender{}
+	_ SendAlgorithmWithDebugInfos = &CubicSender{}
 )
 
 // NewCubicSender makes a new cubic sender
@@ -74,7 +74,7 @@ func NewCubicSender(
 	initialMaxDatagramSize protocol.ByteCount,
 	reno bool,
 	qlogger qlogwriter.Recorder,
-) *cubicSender {
+) *CubicSender {
 	return newCubicSender(
 		clock,
 		rttStats,
@@ -96,8 +96,8 @@ func newCubicSender(
 	initialCongestionWindow,
 	initialMaxCongestionWindow protocol.ByteCount,
 	qlogger qlogwriter.Recorder,
-) *cubicSender {
-	c := &cubicSender{
+) *CubicSender {
+	c := &CubicSender{
 		rttStats:                   rttStats,
 		connStats:                  connStats,
 		largestSentPacketNumber:    protocol.InvalidPacketNumber,
@@ -124,23 +124,23 @@ func newCubicSender(
 }
 
 // TimeUntilSend returns when the next packet should be sent.
-func (c *cubicSender) TimeUntilSend(_ protocol.ByteCount) monotime.Time {
+func (c *CubicSender) TimeUntilSend(_ protocol.ByteCount) monotime.Time {
 	return c.pacer.TimeUntilSend()
 }
 
-func (c *cubicSender) HasPacingBudget(now monotime.Time) bool {
+func (c *CubicSender) HasPacingBudget(now monotime.Time) bool {
 	return c.pacer.Budget(now) >= c.maxDatagramSize
 }
 
-func (c *cubicSender) maxCongestionWindow() protocol.ByteCount {
+func (c *CubicSender) maxCongestionWindow() protocol.ByteCount {
 	return c.maxDatagramSize * protocol.MaxCongestionWindowPackets
 }
 
-func (c *cubicSender) minCongestionWindow() protocol.ByteCount {
+func (c *CubicSender) minCongestionWindow() protocol.ByteCount {
 	return c.maxDatagramSize * minCongestionWindowPackets
 }
 
-func (c *cubicSender) OnPacketSent(
+func (c *CubicSender) OnPacketSent(
 	sentTime monotime.Time,
 	_ protocol.ByteCount,
 	packetNumber protocol.PacketNumber,
@@ -155,23 +155,23 @@ func (c *cubicSender) OnPacketSent(
 	c.hybridSlowStart.OnPacketSent(packetNumber)
 }
 
-func (c *cubicSender) CanSend(bytesInFlight protocol.ByteCount) bool {
+func (c *CubicSender) CanSend(bytesInFlight protocol.ByteCount) bool {
 	return bytesInFlight < c.GetCongestionWindow()
 }
 
-func (c *cubicSender) InRecovery() bool {
+func (c *CubicSender) InRecovery() bool {
 	return c.largestAckedPacketNumber != protocol.InvalidPacketNumber && c.largestAckedPacketNumber <= c.largestSentAtLastCutback
 }
 
-func (c *cubicSender) InSlowStart() bool {
+func (c *CubicSender) InSlowStart() bool {
 	return c.GetCongestionWindow() < c.slowStartThreshold
 }
 
-func (c *cubicSender) GetCongestionWindow() protocol.ByteCount {
+func (c *CubicSender) GetCongestionWindow() protocol.ByteCount {
 	return c.congestionWindow
 }
 
-func (c *cubicSender) MaybeExitSlowStart() {
+func (c *CubicSender) MaybeExitSlowStart() {
 	if c.InSlowStart() &&
 		c.hybridSlowStart.ShouldExitSlowStart(c.rttStats.LatestRTT(), c.rttStats.MinRTT(), c.GetCongestionWindow()/c.maxDatagramSize) {
 		// exit slow start
@@ -180,7 +180,7 @@ func (c *cubicSender) MaybeExitSlowStart() {
 	}
 }
 
-func (c *cubicSender) OnPacketAcked(
+func (c *CubicSender) OnPacketAcked(
 	ackedPacketNumber protocol.PacketNumber,
 	ackedBytes protocol.ByteCount,
 	priorInFlight protocol.ByteCount,
@@ -196,7 +196,7 @@ func (c *cubicSender) OnPacketAcked(
 	}
 }
 
-func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lostBytes, priorInFlight protocol.ByteCount) {
+func (c *CubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lostBytes, priorInFlight protocol.ByteCount) {
 	c.connStats.PacketsLost.Add(1)
 	c.connStats.BytesLost.Add(uint64(lostBytes))
 
@@ -225,7 +225,7 @@ func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lost
 
 // Called when we receive an ack. Normal TCP tracks how many packets one ack
 // represents, but quic has a separate ack for each packet.
-func (c *cubicSender) maybeIncreaseCwnd(
+func (c *CubicSender) maybeIncreaseCwnd(
 	_ protocol.PacketNumber,
 	ackedBytes protocol.ByteCount,
 	priorInFlight protocol.ByteCount,
@@ -264,7 +264,7 @@ func (c *cubicSender) maybeIncreaseCwnd(
 	}
 }
 
-func (c *cubicSender) isCwndLimited(bytesInFlight protocol.ByteCount) bool {
+func (c *CubicSender) isCwndLimited(bytesInFlight protocol.ByteCount) bool {
 	congestionWindow := c.GetCongestionWindow()
 	if bytesInFlight >= congestionWindow {
 		return true
@@ -275,7 +275,7 @@ func (c *cubicSender) isCwndLimited(bytesInFlight protocol.ByteCount) bool {
 }
 
 // BandwidthEstimate returns the current bandwidth estimate
-func (c *cubicSender) BandwidthEstimate() Bandwidth {
+func (c *CubicSender) BandwidthEstimate() Bandwidth {
 	srtt := c.rttStats.SmoothedRTT()
 	if srtt == 0 {
 		// This should never happen, but if it does, avoid division by zero.
@@ -285,7 +285,7 @@ func (c *cubicSender) BandwidthEstimate() Bandwidth {
 }
 
 // OnRetransmissionTimeout is called on an retransmission timeout
-func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
+func (c *CubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 	c.largestSentAtLastCutback = protocol.InvalidPacketNumber
 	if !packetsRetransmitted {
 		return
@@ -297,7 +297,7 @@ func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 }
 
 // OnConnectionMigration is called when the connection is migrated (?)
-func (c *cubicSender) OnConnectionMigration() {
+func (c *CubicSender) OnConnectionMigration() {
 	c.hybridSlowStart.Restart()
 	c.largestSentPacketNumber = protocol.InvalidPacketNumber
 	c.largestAckedPacketNumber = protocol.InvalidPacketNumber
@@ -309,7 +309,7 @@ func (c *cubicSender) OnConnectionMigration() {
 	c.slowStartThreshold = c.initialMaxCongestionWindow
 }
 
-func (c *cubicSender) maybeQlogStateChange(new qlog.CongestionState) {
+func (c *CubicSender) maybeQlogStateChange(new qlog.CongestionState) {
 	if c.qlogger == nil || new == c.lastState {
 		return
 	}
@@ -317,7 +317,7 @@ func (c *cubicSender) maybeQlogStateChange(new qlog.CongestionState) {
 	c.lastState = new
 }
 
-func (c *cubicSender) SetMaxDatagramSize(s protocol.ByteCount) {
+func (c *CubicSender) SetMaxDatagramSize(s protocol.ByteCount) {
 	if s < c.maxDatagramSize {
 		panic(fmt.Sprintf("congestion BUG: decreased max datagram size from %d to %d", c.maxDatagramSize, s))
 	}

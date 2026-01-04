@@ -30,7 +30,7 @@ func (c *mockClock) Advance(d time.Duration) {
 const MaxCongestionWindow = 200 * maxDatagramSize
 
 type testCubicSender struct {
-	sender            *cubicSender
+	sender            *CubicSender
 	clock             *mockClock
 	rttStats          *utils.RTTStats
 	bytesInFlight     protocol.ByteCount

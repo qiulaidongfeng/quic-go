@@ -89,7 +89,7 @@ type sentPacketHandler struct {
 
 	bytesInFlight protocol.ByteCount
 
-	congestion congestion.SendAlgorithmWithDebugInfos
+	Congestion congestion.SendAlgorithmWithDebugInfos
 	rttStats   *utils.RTTStats
 	connStats  *utils.ConnectionStats
 
@@ -115,6 +115,10 @@ type sentPacketHandler struct {
 
 var _ SentPacketHandler = &sentPacketHandler{}
 
+type setMinRTT interface {
+	SetMinRTT(func() time.Duration)
+}
+
 // clientAddressValidated indicates whether the address was validated beforehand by an address validation token.
 // If the address was validated, the amplification limit doesn't apply. It has no effect for a client.
 func NewSentPacketHandler(
@@ -128,15 +132,20 @@ func NewSentPacketHandler(
 	pers protocol.Perspective,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
+	Congestion congestion.SendAlgorithmWithDebugInfos,
 ) SentPacketHandler {
-	congestion := congestion.NewCubicSender(
-		congestion.DefaultClock{},
-		rttStats,
-		connStats,
-		initialMaxDatagramSize,
-		true, // use Reno
-		qlogger,
-	)
+	if Congestion == nil {
+		Congestion = congestion.NewCubicSender(
+			congestion.DefaultClock{},
+			rttStats,
+			connStats,
+			initialMaxDatagramSize,
+			true, // use Reno
+			qlogger,
+		)
+	} else {
+		Congestion.(setMinRTT).SetMinRTT(rttStats.MinRTT)
+	}
 
 	h := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
@@ -147,7 +156,7 @@ func NewSentPacketHandler(
 		lostPackets:                    *newLostPacketTracker(64),
 		rttStats:                       rttStats,
 		connStats:                      connStats,
-		congestion:                     congestion,
+		Congestion:                     Congestion,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,
@@ -297,7 +306,7 @@ func (h *sentPacketHandler) SentPacket(
 			h.numProbesToSend--
 		}
 	}
-	h.congestion.OnPacketSent(t, h.bytesInFlight, pn, size, isAckEliciting)
+	h.Congestion.OnPacketSent(t, h.bytesInFlight, pn, size, isAckEliciting)
 
 	if encLevel == protocol.Encryption1RTT && h.ecnTracker != nil {
 		h.ecnTracker.SentPacket(pn, ecn)
@@ -341,7 +350,7 @@ func (h *sentPacketHandler) qlogMetricsUpdated() {
 			updated = true
 		}
 	}
-	if cwnd := h.congestion.GetCongestionWindow(); h.lastMetrics.CongestionWindow != int(cwnd) {
+	if cwnd := h.Congestion.GetCongestionWindow(); h.lastMetrics.CongestionWindow != int(cwnd) {
 		metricsUpdatedEvent.CongestionWindow = int(cwnd)
 		h.lastMetrics.CongestionWindow = metricsUpdatedEvent.CongestionWindow
 		updated = true
@@ -417,7 +426,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 				}
 				h.largestAckedTime = p.SendTime
 			}
-			h.congestion.MaybeExitSlowStart()
+			h.Congestion.MaybeExitSlowStart()
 		}
 	}
 
@@ -425,7 +434,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	if encLevel == protocol.Encryption1RTT && h.ecnTracker != nil && largestAcked > pnSpace.largestAcked {
 		congested := h.ecnTracker.HandleNewlyAcked(ackedPackets, int64(ack.ECT0), int64(ack.ECT1), int64(ack.ECNCE))
 		if congested {
-			h.congestion.OnCongestionEvent(largestAcked, 0, priorInFlight)
+			h.Congestion.OnCongestionEvent(largestAcked, 0, priorInFlight)
 		}
 	}
 
@@ -438,7 +447,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	var acked1RTTPacket bool
 	for _, p := range ackedPackets {
 		if p.includedInBytesInFlight {
-			h.congestion.OnPacketAcked(p.PacketNumber, p.Length, priorInFlight, rcvTime)
+			h.Congestion.OnPacketAcked(p.PacketNumber, p.Length, priorInFlight, rcvTime)
 		}
 		if p.EncryptionLevel == protocol.Encryption1RTT {
 			acked1RTTPacket = true
@@ -854,7 +863,7 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 				h.removeFromBytesInFlight(p)
 				h.queueFramesForRetransmission(p)
 				if !p.IsPathMTUProbePacket {
-					h.congestion.OnCongestionEvent(pn, p.Length, priorInFlight)
+					h.Congestion.OnCongestionEvent(pn, p.Length, priorInFlight)
 				}
 				if encLevel == protocol.Encryption1RTT && h.ecnTracker != nil {
 					h.ecnTracker.LostPacket(pn)
@@ -1005,9 +1014,9 @@ func (h *sentPacketHandler) SendMode(now monotime.Time) SendMode {
 		return h.ptoMode
 	}
 	// Only send ACKs if we're congestion limited.
-	if !h.congestion.CanSend(h.bytesInFlight) {
+	if !h.Congestion.CanSend(h.bytesInFlight) {
 		if h.logger.Debug() {
-			h.logger.Debugf("Congestion limited: bytes in flight %d, window %d", h.bytesInFlight, h.congestion.GetCongestionWindow())
+			h.logger.Debugf("Congestion limited: bytes in flight %d, window %d", h.bytesInFlight, h.Congestion.GetCongestionWindow())
 		}
 		return SendAck
 	}
@@ -1017,18 +1026,18 @@ func (h *sentPacketHandler) SendMode(now monotime.Time) SendMode {
 		}
 		return SendAck
 	}
-	if !h.congestion.HasPacingBudget(now) {
+	if !h.Congestion.HasPacingBudget(now) {
 		return SendPacingLimited
 	}
 	return SendAny
 }
 
 func (h *sentPacketHandler) TimeUntilSend() monotime.Time {
-	return h.congestion.TimeUntilSend(h.bytesInFlight)
+	return h.Congestion.TimeUntilSend(h.bytesInFlight)
 }
 
 func (h *sentPacketHandler) SetMaxDatagramSize(s protocol.ByteCount) {
-	h.congestion.SetMaxDatagramSize(s)
+	h.Congestion.SetMaxDatagramSize(s)
 }
 
 func (h *sentPacketHandler) isAmplificationLimited() bool {
@@ -1131,13 +1140,17 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 	for pn := range h.appDataPackets.history.PathProbes() {
 		h.appDataPackets.history.RemovePathProbe(pn)
 	}
-	h.congestion = congestion.NewCubicSender(
-		congestion.DefaultClock{},
-		h.rttStats,
-		h.connStats,
-		initialMaxDatagramSize,
-		true, // use Reno
-		h.qlogger,
-	)
+	if _, ok := h.Congestion.(*congestion.CubicSender); ok {
+		h.Congestion = congestion.NewCubicSender(
+			congestion.DefaultClock{},
+			h.rttStats,
+			h.connStats,
+			initialMaxDatagramSize,
+			true, // use Reno
+			h.qlogger,
+		)
+	} else {
+		h.Congestion.OnRetransmissionTimeout(true)
+	}
 	h.setLossDetectionTimer(now)
 }
