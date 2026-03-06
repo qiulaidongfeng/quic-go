@@ -1,16 +1,14 @@
 # Fork Maintainer's Notes
 
-My web server is in New York, USA, using a Vultr server. I am located in Asia. I always encounter extremely slow network speed with HTTP/3, while HTTP/2 with BBR does not. Therefore, I plan to fork the project to implement BBR v1 myself.
+My web server is in New York, USA, using a Vultr server(AS20473). I am located in Asia(AS17816). 2–10% packet loss at night is a natural phenomenon (measured by ping -t). I always encounter extremely slow network speed with HTTP/3, while HTTP/2 with BBR does not. Therefore, I plan to fork the project to implement BBR v1 myself.
 
 Thanks for http://arthurchiao.art/blog/bbr-paper-zh/ .
 
-Thanks for @tsuna.
+Thanks for @tsuna .
 
 I only tested this branch in my specific scenario and found significant improvements for me, so I opened it up. I hope it can help others.
 
 I will sync with upstream every 1–2 months to ensure this branch remains useful.
-
-It has known flaws: the MINRTT measurement is incorrect (it always stays at 100ms in long fat networks). However, due to a defect in the maximum bandwidth measurement mechanism, which restarts measurement from 0 every fixed MINRTT interval, the result is sometimes too low and sometimes too high. This results in cwnd behaving reasonably, and this branch still solves my problem.
 
 Issues and PRs are welcome, and @qiulaidongfeng .
 
