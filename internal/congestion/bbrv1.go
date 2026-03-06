@@ -10,8 +10,8 @@ import (
 var _ SendAlgorithm = (*BBRv1Sender)(nil)
 var _ SendAlgorithmWithDebugInfos = (*BBRv1Sender)(nil)
 
-type minRTTInfo struct {
-	minrtt     time.Duration
+type ackInfo struct {
+	ackedBytes protocol.ByteCount
 	recordTime time.Duration
 }
 type BBRv1Sender struct {
@@ -19,22 +19,24 @@ type BBRv1Sender struct {
 	round            int64
 	round_start_time monotime.Time
 
-	st_start_round int64
-	st_last_bw     protocol.ByteCount
+	startup_last_bw_grow25_round int64
+	startup_last_bw              protocol.ByteCount // bandwidth is when startup_last_bw_grow25_round
 
 	pacing_gain float64
 	cwnd_gain   float64
 
-	minRTT            func() time.Duration
-	historyminRTT     []minRTTInfo
-	lastNewMinRTT     time.Duration
-	lastNewMinRTTTime monotime.Time
-	maxBandwidth      protocol.ByteCount
-	latelybandwidth   [bw_win]protocol.ByteCount
-	probeRTTStart     monotime.Time
+	sentTimes map[protocol.PacketNumber]monotime.Time
+	// If the latest minrtt has not been updated for more than 10 seconds,
+	// it indicates that the historical minrtt has also not been updated for more than 10 seconds.
+	// Therefore, only the latest minrtt needs to be tracked.
+	lastNewMinRTT      time.Duration
+	lastNewMinRTTTime  monotime.Time
+	last_probeRTTStart monotime.Time
+	maxBandwidth       protocol.ByteCount // byte/s
+	delivered          protocol.ByteCount // byte
+	ackinfo            []ackInfo
+	latelybandwidth    [bw_win]protocol.ByteCount
 
-	delivered       protocol.ByteCount
-	delivered_time  monotime.Time
 	nextSendTime    monotime.Time
 	maxDatagramSize protocol.ByteCount
 	inRecovery      bool
@@ -46,40 +48,37 @@ const (
 	PROBE_BW
 	PROBE_RTT
 )
-
-const bw_win = 16
+const bw_win = 16 // maxbandwidth sliding window size.
+const min_bdp = 32
 
 var probeBWCycleGain = []float64{1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0}
 
 func NewBBRv1Sender(initialMaxDatagramSize protocol.ByteCount) *BBRv1Sender {
-	return &BBRv1Sender{
+	ret := &BBRv1Sender{
 		state:             STARTUP,
-		maxBandwidth:      32 * initialMaxDatagramSize,
 		maxDatagramSize:   initialMaxDatagramSize,
 		pacing_gain:       2.89,
 		cwnd_gain:         2.89,
-		lastNewMinRTT:     10 * time.Second,
+		lastNewMinRTT:     10 * time.Second, // When the first ack arrives, it will be updated to the actual rtt. Set high values to avoid underestimating minrtt.
+		round_start_time:  monotime.Now(),
 		lastNewMinRTTTime: monotime.Now(),
+		sentTimes:         make(map[protocol.PacketNumber]monotime.Time),
 	}
-}
-
-func (b *BBRv1Sender) SetMinRTT(f func() time.Duration) {
-	b.minRTT = f
-	b.lastNewMinRTT = f()
-	b.lastNewMinRTTTime = monotime.Now()
+	ret.maxBandwidth = ret.min_maxbandwidth()
+	return ret
 }
 
 func (b *BBRv1Sender) HasPacingBudget(now monotime.Time) bool {
 	b.mayExitPROBE_RTT(now)
-	if b.state == PROBE_RTT {
+	if b.state == PROBE_RTT { //in PROBE_RTT or STARTUP , send limit because cwnd.
 		return true
 	}
-	delivery_rate := (b.delivered / max(1, protocol.ByteCount(now-b.delivered_time)/protocol.ByteCount(time.Second)))
-	return delivery_rate < (max(32*b.maxDatagramSize, protocol.ByteCount(b.bdp()*b.pacing_gain)))
+	delivery_rate := float64(b.update_lastbandwidth_filter(now))
+	return delivery_rate < float64(b.maxBandwidth)*b.pacing_gain
 }
 
-func (b *BBRv1Sender) bdp() float64 {
-	return max(float64(b.maxBandwidth)*(float64(b.minRTT())/float64(time.Second)), float64(32*b.maxDatagramSize))
+func (b *BBRv1Sender) bdp() float64 { //result(byte)
+	return max(float64(b.maxBandwidth)*(float64(b.lastNewMinRTT)/float64(time.Second)), float64(min_bdp*b.maxDatagramSize))
 }
 
 func (b *BBRv1Sender) cwnd() protocol.ByteCount {
@@ -94,9 +93,7 @@ func (b *BBRv1Sender) TimeUntilSend(bytesInFlight protocol.ByteCount) monotime.T
 }
 
 func (b *BBRv1Sender) OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.ByteCount, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool) {
-	if b.delivered_time == 0 {
-		b.delivered_time = sentTime
-	}
+	b.sentTimes[packetNumber] = sentTime
 	b.nextSendTime = sentTime + monotime.Time(float64(bytes)*float64(time.Second)/(b.pacing_gain*float64(b.maxBandwidth)))
 }
 
@@ -105,7 +102,7 @@ func (b *BBRv1Sender) CanSend(bytesInFlight protocol.ByteCount) bool {
 }
 
 func (b *BBRv1Sender) mayExitPROBE_RTT(Time monotime.Time) {
-	if b.state == PROBE_RTT && Time-b.probeRTTStart >= monotime.Time(200*time.Millisecond) {
+	if b.state == PROBE_RTT && Time-b.last_probeRTTStart >= monotime.Time(200*time.Millisecond) {
 		b.entry_PROBE_BW()
 	}
 }
@@ -116,86 +113,73 @@ func (b *BBRv1Sender) entry_PROBE_BW() {
 	b.cwnd_gain = 2
 }
 
-func (b *BBRv1Sender) update_minrtt_filter() {
-	now := time.Duration(monotime.Now())
-	if len(b.historyminRTT) > 0 && now-b.historyminRTT[0].recordTime >= 10*time.Second {
-		keep_start_index := 0
-		for i := range b.historyminRTT {
-			if now-b.historyminRTT[i].recordTime < 10*time.Second {
-				keep_start_index = i
-				break
-			}
-		}
-		if keep_start_index < len(b.historyminRTT) {
-			b.historyminRTT = b.historyminRTT[keep_start_index:]
-			minrtt, eventTime := time.Duration(0), time.Duration(0)
-			for _, h := range b.historyminRTT {
-				if h.minrtt < minrtt {
-					minrtt = h.minrtt
-					eventTime = h.recordTime
-				}
-			}
-			b.lastNewMinRTT = minrtt
-			b.lastNewMinRTTTime = monotime.Time(eventTime)
-		} else {
-			b.historyminRTT = b.historyminRTT[0:0]
-			b.lastNewMinRTT = 10 * time.Second
-		}
-	}
+func (b *BBRv1Sender) min_maxbandwidth() protocol.ByteCount { // min_bdp * rtt, result(byte/s)
+	return protocol.ByteCount(float64(min_bdp*b.maxDatagramSize) * (float64(time.Second) / float64(b.lastNewMinRTT)))
 }
 
-func (b *BBRv1Sender) update_bandwidth_filter() {
-	b.maxBandwidth = 32 * b.maxDatagramSize
+func (b *BBRv1Sender) update_maxbandwidth_filter() {
+	b.maxBandwidth = b.min_maxbandwidth()
 	for i := range bw_win {
-		if b.latelybandwidth[i] > b.maxBandwidth {
-			b.maxBandwidth = b.latelybandwidth[i]
-		}
+		b.maxBandwidth = max(b.maxBandwidth, b.latelybandwidth[i])
 	}
 }
 
-func (b *BBRv1Sender) exit_recover() {
+func (b *BBRv1Sender) exit_recover() { //When PROBE_BW, pacing_gain set in OnPacketAcked.
 	b.inRecovery = false
 	switch b.state {
 	case STARTUP:
 		b.pacing_gain = 2.89
 	case DRAIN:
 		b.pacing_gain = 0.345
-	case PROBE_BW:
-		b.pacing_gain = 1
 	case PROBE_RTT:
 		b.pacing_gain = 1
 	}
 }
 
+func (b *BBRv1Sender) update_lastbandwidth_filter(eventTime monotime.Time) (delivery_rate protocol.ByteCount) { //result=byte/s
+	keep_start_index, expire_sum := 0, 0
+	for i := range b.ackinfo { // delivery_rate of the most recent minRTT obtained via sliding window.
+		if time.Duration(eventTime)-b.ackinfo[i].recordTime > b.lastNewMinRTT {
+			keep_start_index = i + 1
+			expire_sum += int(b.ackinfo[i].ackedBytes)
+		}
+	}
+	b.ackinfo = b.ackinfo[keep_start_index:]
+	b.delivered -= protocol.ByteCount(expire_sum)
+	return protocol.ByteCount(float64(b.delivered) / (float64(b.lastNewMinRTT) / float64(time.Second)))
+}
+
 func (b *BBRv1Sender) OnPacketAcked(number protocol.PacketNumber, ackedBytes protocol.ByteCount, priorInFlight protocol.ByteCount, eventTime monotime.Time) {
-	minrtt := b.minRTT()
+	sentTime := b.sentTimes[number]
+	rtt := time.Duration(eventTime - sentTime)
+	delete(b.sentTimes, number)
 	b.mayExitPROBE_RTT(eventTime)
-	if minrtt < b.lastNewMinRTT {
-		b.lastNewMinRTT = minrtt
-		b.historyminRTT = append(b.historyminRTT, minRTTInfo{minrtt: minrtt, recordTime: time.Duration(eventTime)})
+	if rtt < b.lastNewMinRTT && rtt > 0 { //In the local link, rtt may sometimes measure 0 due to timer accuracy.
+		b.lastNewMinRTT = rtt
 		b.lastNewMinRTTTime = eventTime
 	}
 	b.delivered += ackedBytes
-	if b.state == PROBE_RTT {
+	b.ackinfo = append(b.ackinfo, ackInfo{ackedBytes: ackedBytes, recordTime: time.Duration(eventTime)})
+	if b.state == PROBE_RTT { // When PROBE_RTT, Do not update the round; otherwise, the bandwidth sliding window may be exhausted at low RTT.
 		return
 	}
-	b.update_minrtt_filter()
-	delivery_rate := protocol.ByteCount(float64(b.delivered) / (float64(eventTime-b.delivered_time) / float64(time.Second)))
-	if eventTime-b.round_start_time >= monotime.Time(minrtt) {
+	delivery_rate := b.update_lastbandwidth_filter(eventTime)
+	if eventTime-b.round_start_time >= monotime.Time(b.lastNewMinRTT) {
 		if b.inRecovery {
 			b.exit_recover()
 		}
 		b.latelybandwidth[b.round%bw_win] = delivery_rate
 		b.round++
-		b.round_start_time = eventTime
-		b.delivered = 0
-		b.delivered_time = eventTime
-		b.update_bandwidth_filter()
-		if b.state == STARTUP && b.maxBandwidth > b.st_last_bw && ((float64(b.maxBandwidth)-float64(b.st_last_bw))/float64(b.st_last_bw) >= 0.25) {
-			b.st_last_bw = b.maxBandwidth
-			b.st_start_round = b.round
+		if b.state == PROBE_BW {
+			b.pacing_gain = probeBWCycleGain[b.round%8]
 		}
-		if b.state == STARTUP && b.round-b.st_start_round >= 3 {
+		b.round_start_time = eventTime
+		b.update_maxbandwidth_filter()
+		if b.state == STARTUP && b.maxBandwidth > b.startup_last_bw && ((float64(b.maxBandwidth)-float64(b.startup_last_bw))/float64(b.startup_last_bw) >= 0.25) {
+			b.startup_last_bw = b.maxBandwidth
+			b.startup_last_bw_grow25_round = b.round
+		}
+		if b.state == STARTUP && b.round-b.startup_last_bw_grow25_round >= 3 {
 			b.state = DRAIN
 			b.pacing_gain = 0.345
 			b.cwnd_gain = 1
@@ -206,19 +190,21 @@ func (b *BBRv1Sender) OnPacketAcked(number protocol.PacketNumber, ackedBytes pro
 	}
 	app_limited := priorInFlight < protocol.ByteCount(b.bdp())
 	if (delivery_rate > b.maxBandwidth || (!app_limited && delivery_rate > 0)) && b.state != DRAIN && !b.inRecovery {
-		b.maxBandwidth = delivery_rate
+		b.maxBandwidth = max(delivery_rate, b.min_maxbandwidth())
 	}
-	if eventTime-b.lastNewMinRTTTime >= monotime.Time((10*time.Second)) && eventTime-b.probeRTTStart >= monotime.Time((10*time.Second)) {
+	if eventTime-b.lastNewMinRTTTime >= monotime.Time((10*time.Second)) && eventTime-b.last_probeRTTStart >= monotime.Time((10*time.Second)) {
 		b.state = PROBE_RTT
 		b.pacing_gain = 1
 		b.cwnd_gain = 1
-		b.probeRTTStart = eventTime
+		b.last_probeRTTStart = eventTime
 	}
 }
 
 func (b *BBRv1Sender) MaybeExitSlowStart() {}
 
 func (b *BBRv1Sender) OnCongestionEvent(number protocol.PacketNumber, lostBytes protocol.ByteCount, priorInFlight protocol.ByteCount) {
+	// For AS20473 → AS17816, 2–10% packet loss at night is a natural phenomenon (measured by ping -t).
+	// pacing_gain=1 reduces the actual delivery rate; pacing_gain=1.25 is the key mechanism to maintain the rate.
 	// TODO: handle this
 	// if b.state == STARTUP || b.state == PROBE_RTT {
 	// 	return
@@ -230,13 +216,9 @@ func (b *BBRv1Sender) OnCongestionEvent(number protocol.PacketNumber, lostBytes 
 // OnRetransmissionTimeout is called when a retransmission timer expires.
 func (b *BBRv1Sender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 	if packetsRetransmitted {
-		b.maxBandwidth = 32 * b.maxDatagramSize
-		b.state = STARTUP
-		b.pacing_gain = 2.89
-		b.cwnd_gain = 2.89
-		b.inRecovery = false
-		b.delivered = 0
-		clear(b.latelybandwidth[:])
+		oldlastNewMinRTT, oldlastNewMinRTTTime, oldprobeRTTStart := b.lastNewMinRTT, b.lastNewMinRTTTime, b.last_probeRTTStart
+		*b = *NewBBRv1Sender(b.maxDatagramSize)
+		b.lastNewMinRTT, b.lastNewMinRTTTime, b.last_probeRTTStart = oldlastNewMinRTT, oldlastNewMinRTTTime, oldprobeRTTStart
 	}
 }
 
