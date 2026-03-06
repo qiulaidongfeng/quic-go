@@ -116,10 +116,6 @@ type sentPacketHandler struct {
 
 var _ SentPacketHandler = &sentPacketHandler{}
 
-type setMinRTT interface {
-	SetMinRTT(func() time.Duration)
-}
-
 // clientAddressValidated indicates whether the address was validated beforehand by an address validation token.
 // If the address was validated, the amplification limit doesn't apply. It has no effect for a client.
 func NewSentPacketHandler(
@@ -144,8 +140,6 @@ func NewSentPacketHandler(
 			true, // use Reno
 			qlogger,
 		)
-	} else {
-		Congestion.(setMinRTT).SetMinRTT(rttStats.MinRTT)
 	}
 
 	h := &sentPacketHandler{
