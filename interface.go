@@ -240,8 +240,6 @@ type SendAlgorithm interface {
 	OnCongestionEvent(number protocol.PacketNumber, lostBytes ByteCount, priorInFlight ByteCount)
 	OnRetransmissionTimeout(packetsRetransmitted bool)
 	SetMaxDatagramSize(ByteCount)
-
-	SetMinRTT(func() time.Duration)
 }
 
 // A SendAlgorithmWithDebugInfos is a SendAlgorithm that exposes some debug infos
