@@ -196,6 +196,7 @@ func (b *BBRv1Sender) OnPacketAcked(number protocol.PacketNumber, ackedBytes pro
 		b.state = PROBE_RTT
 		b.pacing_gain = 1
 		b.cwnd_gain = 1
+		b.lastNewMinRTT = 10 * time.Second
 		b.last_probeRTTStart = eventTime
 	}
 }
