@@ -70,7 +70,7 @@ func NewBBRv1Sender(initialMaxDatagramSize protocol.ByteCount) *BBRv1Sender {
 
 func (b *BBRv1Sender) HasPacingBudget(now monotime.Time) bool {
 	b.mayExitPROBE_RTT(now)
-	if b.state == PROBE_RTT { //in PROBE_RTT or STARTUP , send limit because cwnd.
+	if b.state == PROBE_RTT { //in PROBE_RTT, send limit because cwnd.
 		return true
 	}
 	delivery_rate := float64(b.update_lastbandwidth_filter(now))
