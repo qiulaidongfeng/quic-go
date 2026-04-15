@@ -251,3 +251,8 @@ func NewBBRv1(conf *Config) SendAlgorithmWithDebugInfos {
 	conf = populateConfig(conf)
 	return congestion.NewBBRv1Sender(protocol.ByteCount(conf.InitialPacketSize))
 }
+
+func NewMCC(conf *Config, lowRTTmode bool) SendAlgorithmWithDebugInfos {
+	conf = populateConfig(conf)
+	return congestion.NewMCCSender(protocol.ByteCount(conf.InitialPacketSize), lowRTTmode)
+}
