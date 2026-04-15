@@ -12,6 +12,12 @@ I will sync with upstream every 1–2 months to ensure this branch remains usefu
 
 Issues and PRs are welcome, and @qiulaidongfeng .
 
+This branch also includes my experimental algorithm, MCC (Measuring the Contribution to Congestion). It judges the degree to which the current flow contributes to congestion by checking whether the difference between the current smoothed RTT and the minimum RTT over the past 5 seconds exceeds a threshold.
+During the mccStart phase, slow start is performed. When the limit is reached, it enters mccStop, where the current delivery rate becomes the new sending rate. When the limit is lifted, it enters mccGuard, with the sending rate increased by a factor of 1.25 per second.
+If no smaller MINRTT is observed for 5 consecutive seconds, it enters a 200‑millisecond mccProbeRTT phase (cwnd is halved). This keeps the long‑term in‑flight data volume at approximately 1.n or 2.n times the BDP.
+As a result, the algorithm yields when its share exceeds the fair share, and reclaims bandwidth when other flows exceed the fair share.
+For details, refer to the implementation [comments](internal/congestion/mcc.go)
+
 <div align="center" style="margin-bottom: 15px;">
   <img src="./assets/quic-go-logo.png" width="700" height="auto">
 </div>
