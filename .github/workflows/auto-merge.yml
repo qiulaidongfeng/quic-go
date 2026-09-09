@@ -1,0 +1,41 @@
+
+name: Auto Rebuild BBR on Upstream
+
+on:
+  schedule:
+    - cron: '26 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  rebuild-master:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add remotes and fetch
+        run: |
+          git remote add upstream https://github.com/quic-go/quic-go.git
+          git remote add bbr-repo https://github.com/qiulaidongfeng/quic-go.git
+          git fetch upstream master
+          git fetch bbr-repo master
+
+      - name: checkout master branch
+        run: |
+          cp .github/workflows/auto-merge.yml /tmp/auto-merge.yml
+          git checkout master
+          git reset --hard bbr-repo/master
+      - name: rebase master branch
+        run: |
+          git rebase upstream/master
+
+      - name: Force push to origin
+        run: |
+          git push -f origin master
