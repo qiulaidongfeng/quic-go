@@ -25,6 +25,8 @@ type RTTStats struct {
 	latestRTT     atomic.Int64 // nanoseconds
 	smoothedRTT   atomic.Int64 // nanoseconds
 	meanDeviation atomic.Int64 // nanoseconds
+	count         atomic.Int64
+	avgRTT        atomic.Int64 // nanoseconds
 
 	maxAckDelay atomic.Int64 // nanoseconds
 }
@@ -34,6 +36,7 @@ func NewRTTStats() *RTTStats {
 	rttStats.minRTT.Store(DefaultInitialRTT.Nanoseconds())
 	rttStats.latestRTT.Store(DefaultInitialRTT.Nanoseconds())
 	rttStats.smoothedRTT.Store(DefaultInitialRTT.Nanoseconds())
+	rttStats.avgRTT.Store(DefaultInitialRTT.Nanoseconds())
 	return &rttStats
 }
 
@@ -58,6 +61,10 @@ func (r *RTTStats) SmoothedRTT() time.Duration {
 // MeanDeviation gets the mean deviation
 func (r *RTTStats) MeanDeviation() time.Duration {
 	return time.Duration(r.meanDeviation.Load())
+}
+
+func (r *RTTStats) AvgRTT() time.Duration {
+	return time.Duration(r.avgRTT.Load())
 }
 
 // MaxAckDelay gets the max_ack_delay advertised by the peer
@@ -106,12 +113,21 @@ func (r *RTTStats) UpdateRTT(sendDelta, ackDelay time.Duration) {
 		r.hasMeasurement = true
 		r.smoothedRTT.Store(sample.Nanoseconds())
 		r.meanDeviation.Store(sample.Nanoseconds() / 2)
+		r.avgRTT.Store(sample.Nanoseconds())
 	} else {
 		smoothedRTT := r.SmoothedRTT()
 		meanDev := time.Duration(oneMinusBeta*float32(r.MeanDeviation()/time.Microsecond)+rttBeta*float32((smoothedRTT-sample).Abs()/time.Microsecond)) * time.Microsecond
 		newSmoothedRTT := time.Duration((float32(smoothedRTT/time.Microsecond)*oneMinusAlpha)+(float32(sample/time.Microsecond)*rttAlpha)) * time.Microsecond
 		r.meanDeviation.Store(meanDev.Nanoseconds())
 		r.smoothedRTT.Store(newSmoothedRTT.Nanoseconds())
+		c := r.count.Add(1)
+		for {
+			c = r.count.Load()
+			old := r.avgRTT.Load()
+			if r.avgRTT.CompareAndSwap(old, old+(sample.Nanoseconds()-old)/c) {
+				break
+			}
+		}
 	}
 }
 

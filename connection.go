@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"reflect"
 	"slices"
 	"sync"
@@ -226,6 +227,16 @@ type Conn struct {
 	qlogTrace qlogwriter.Trace
 	qlogger   qlogwriter.Recorder
 	logger    utils.Logger
+}
+
+// PrintDebug print debug info to stderr.
+// Assuming the data sent is 1Gib in size.
+func (c *Conn) PrintDebug() {
+	fmt.Fprintf(os.Stderr, "minrtt=%s meandev=%s avgrtt=%s srtt=%s lossnum=%v loss=%v%% totalsent=%v resent=%v%%\n",
+		c.rttStats.MinRTT(), c.rttStats.MeanDeviation(), c.rttStats.AvgRTT(), c.rttStats.SmoothedRTT(),
+		c.connStats.PacketsLost.Load(), float64(c.connStats.PacketsLost.Load())/float64(c.connStats.PacketsSent.Load()),
+		c.connStats.BytesSent.Load(),
+		float64(c.connStats.BytesSent.Load())/float64(1024*1024*1024))
 }
 
 var _ streamSender = &Conn{}

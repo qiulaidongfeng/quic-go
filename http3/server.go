@@ -592,6 +592,9 @@ func (s *Server) handleConn(conn *quic.Conn) error {
 		})
 	}
 	wg.Wait()
+	if conn != nil {
+		conn.PrintDebug()
+	}
 	return handleErr
 }
 
