@@ -14,8 +14,8 @@ type mccState int8
 
 const (
 	mccStart    mccState = iota // do slow start. (pacing_rate grows exponentially every RTT)
-	mccStop                     // avoid occupying bandwidth beyond the fair share. (pacing_rate increases by a factor of 1.25 every secnods)
-	mccGuard                    // guard its own fair share.
+	mccStop                     // avoid occupying bandwidth beyond the fair share.
+	mccGuard                    // guard its own fair share. (pacing_rate increases by a factor of 1.5 every secnods)
 	mccProbeRTT                 // detect the background RTT for which it makes no contribution to congestion.
 
 	// Select a higher initial congestion window at startup to accelerate the startup phase in long-fat pipes,
@@ -67,9 +67,12 @@ type MCCSender struct {
 	backGroundRTT            time.Duration // default 5 * time.Second for detect potentially high background RTT.
 	lastNewbackGroundRTTTime monotime.Time
 	last_probeRTTStart       monotime.Time
+	prev_backGroundRTT       time.Duration
+	prev_stop                monotime.Time
 	nextSendTime             monotime.Time
 	delivered                protocol.ByteCount // byte
-	ackinfo                  []mccackInfo
+	// All information within the srtt window must be retained to achieve precise measurements.
+	ackinfo []mccackInfo
 	// Its meaning is to limit the maximum flight data
 	// volume to not exceed a specified multiple of bdp.
 	// must be greater than 1 to ensure ACK delay.
@@ -81,7 +84,8 @@ type MCCSender struct {
 // When lowRTTmode = false, the algorithm tends to exhaust the total bandwidth; even if bandwidth allocation is fair, it compromises delay fairness.
 // When lowRTTmode = true, the algorithm favors fair allocation of both bandwidth and delay.
 func NewMCCSender(initialMaxDatagramSize protocol.ByteCount, lowRTTmode bool) *MCCSender {
-	r := &MCCSender{maxDatagramSize: initialMaxDatagramSize, last_probeRTTStart: monotime.Now(), backGroundRTT: 5 * time.Second, sentTimes: make(map[protocol.PacketNumber]monotime.Time)}
+	r := &MCCSender{maxDatagramSize: initialMaxDatagramSize, last_probeRTTStart: monotime.Now(), backGroundRTT: 5 * time.Second,
+		sentTimes: make(map[protocol.PacketNumber]monotime.Time), prev_backGroundRTT: 5 * time.Second}
 	r.pacing_rate = r.min_maxbandwidth()
 	r.bdpLimitFactor = 3
 	if lowRTTmode {
@@ -107,7 +111,7 @@ func (b *MCCSender) update_lastbandwidth_filter(eventTime monotime.Time) (delive
 }
 
 func (b *MCCSender) HasPacingBudget(now monotime.Time) bool {
-	b.mayExitProbeRTT()
+	b.mayExitProbeRTT(protocol.MaxByteCount)
 	// To cope with ACK latency, the pacing_rate during comparison needs to be higher.
 	return b.update_lastbandwidth_filter(now) < protocol.ByteCount(float64(b.bdpLimitFactor)*float64(b.pacing_rate))
 }
@@ -122,14 +126,12 @@ func (b *MCCSender) OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.
 }
 
 func (b *MCCSender) CanSend(bytesInFlight protocol.ByteCount) bool {
-	b.mayExitProbeRTT()
+	b.mayExitProbeRTT(bytesInFlight)
 	if bytesInFlight < mccMinBdp*b.maxDatagramSize {
 		return true
 	}
-	cwnd_gain := 1.0
 	if b.state == mccProbeRTT {
-		cwnd_gain = 0.5
-		return bytesInFlight < protocol.ByteCount(b.bdpLimitFactor*float64(b.GetCongestionWindow())*cwnd_gain)
+		return bytesInFlight < protocol.ByteCount(0.8*float64(b.GetCongestionWindow()))
 	}
 	// If the smoothed RTT minus the background RTT is greater than a certain multiple,
 	// it indicates that there may indeed be at least the
@@ -138,6 +140,7 @@ func (b *MCCSender) CanSend(bytesInFlight protocol.ByteCount) bool {
 	r := (b.smoothedRTT - b.backGroundRTT) <= time.Duration(b.bdpLimitFactor-1)*b.backGroundRTT
 	if !r && b.state != mccStop && b.state != mccProbeRTT {
 		b.state = mccStop
+		b.prev_stop = monotime.Now()
 		b.pacing_rate = max(b.update_lastbandwidth_filter(monotime.Now()), b.min_maxbandwidth())
 		// Avoid underestimating the speed due to mccProbeRTT.
 		if monotime.Now()-b.last_probeRTTStart < monotime.Time(b.smoothedRTT) && b.probeRTTSaveRate != 0 {
@@ -147,7 +150,7 @@ func (b *MCCSender) CanSend(bytesInFlight protocol.ByteCount) bool {
 		b.state = mccGuard
 	}
 	// When the flow itself contributes excessively to congestion, reduce the maximum allowed in-flight data by 0.5 BDP to slow down the rate.
-	return r || bytesInFlight < protocol.ByteCount(float64(b.bdpLimitFactor-0.5)*float64(b.GetCongestionWindow())*cwnd_gain)
+	return r || bytesInFlight < protocol.ByteCount(float64(b.bdpLimitFactor-0.5)*float64(b.GetCongestionWindow()))
 }
 
 func (b *MCCSender) OnPacketAcked(number protocol.PacketNumber, ackedBytes protocol.ByteCount, priorInFlight protocol.ByteCount, eventTime monotime.Time) {
@@ -165,11 +168,13 @@ func (b *MCCSender) OnPacketAcked(number protocol.PacketNumber, ackedBytes proto
 			b.lastNewbackGroundRTTTime = monotime.Now()
 		}
 	}
-	b.mayExitProbeRTT()
+	b.mayExitProbeRTT(priorInFlight)
 	b.delivered += ackedBytes
 	b.ackinfo = append(b.ackinfo, mccackInfo{ackedBytes: ackedBytes, recordTime: eventTime})
-	if time.Duration(eventTime-b.last_probeRTTStart) > 5*time.Second && time.Duration(eventTime-b.lastNewbackGroundRTTTime) > 5*time.Second {
+	if (time.Duration(eventTime-b.last_probeRTTStart) > 10*time.Second && time.Duration(eventTime-b.lastNewbackGroundRTTTime) > 10*time.Second) ||
+		(b.state == mccStop && time.Duration(eventTime-b.prev_stop) > 2*time.Second) {
 		b.last_probeRTTStart = monotime.Now()
+		b.prev_backGroundRTT = b.backGroundRTT
 		b.backGroundRTT = 5 * time.Second
 		b.oldState = b.state
 		b.state = mccProbeRTT
@@ -180,14 +185,15 @@ func (b *MCCSender) OnPacketAcked(number protocol.PacketNumber, ackedBytes proto
 	}
 	if b.state == mccGuard {
 		b.ackCount++
-		if b.ackCount%4 == 0 {
+		if b.ackCount%2 == 0 {
 			b.pacing_rate += b.maxDatagramSize
 		}
 	}
 }
 
-func (b *MCCSender) mayExitProbeRTT() {
-	if b.state == mccProbeRTT && time.Duration(monotime.Now()-b.last_probeRTTStart) >= 200*time.Millisecond {
+func (b *MCCSender) mayExitProbeRTT(InFlight protocol.ByteCount) {
+	if b.state == mccProbeRTT && (time.Duration(monotime.Now()-b.last_probeRTTStart) >= 2*b.prev_backGroundRTT ||
+		InFlight < protocol.ByteCount(float64(b.GetCongestionWindow())*0.95)) {
 		b.state = mccGuard
 		if b.oldState == mccStart {
 			b.state = mccStart
@@ -212,7 +218,11 @@ func (b *MCCSender) SetMaxDatagramSize(maxDatagramSize protocol.ByteCount) {
 }
 
 func (b *MCCSender) GetCongestionWindow() protocol.ByteCount {
-	return protocol.ByteCount(float64(b.pacing_rate) * (float64(b.backGroundRTT) / float64(time.Second)))
+	bgrtt := b.backGroundRTT
+	if bgrtt == 5*time.Second {
+		bgrtt = b.prev_backGroundRTT
+	}
+	return protocol.ByteCount(float64(b.pacing_rate) * (float64(bgrtt) / float64(time.Second)))
 }
 
 func (b *MCCSender) InRecovery() bool {
