@@ -17,6 +17,7 @@ During the mccStart phase, slow start is performed. When the limit is reached, i
 If no smaller MINRTT is observed for 5 consecutive seconds, it enters a 200‑millisecond mccProbeRTT phase (cwnd is halved). This keeps the long‑term in‑flight data volume at approximately 1.n or 2.n times the BDP.
 As a result, the algorithm yields when its share exceeds the fair share, and reclaims bandwidth when other flows exceed the fair share.
 For details, refer to the implementation [comments](internal/congestion/mcc.go)
+MCC V2 change, please see https://zhuanlan.zhihu.com/p/2084978785645085043
 
 <div align="center" style="margin-bottom: 15px;">
   <img src="./assets/quic-go-logo.png" width="700" height="auto">
